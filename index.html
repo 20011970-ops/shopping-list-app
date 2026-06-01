@@ -68,6 +68,7 @@
     }
 
     .input-row button:hover { background: #5a67d8; }
+    .input-row button:disabled { background: #a0aec0; cursor: not-allowed; }
 
     .stats {
       font-size: 0.85rem;
@@ -156,6 +157,15 @@
       border-color: #e53e3e;
       color: #e53e3e;
     }
+
+    .clear-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    .error-msg {
+      color: #e53e3e;
+      font-size: 0.85rem;
+      margin-bottom: 12px;
+      display: none;
+    }
   </style>
 </head>
 <body>
@@ -164,31 +174,50 @@
 
     <div class="input-row">
       <input type="text" id="itemInput" placeholder="아이템 입력..." />
-      <button onclick="addItem()">추가</button>
+      <button id="addBtn" onclick="addItem()">추가</button>
     </div>
 
+    <div class="error-msg" id="errorMsg"></div>
     <div class="stats" id="stats"></div>
 
     <ul id="list"></ul>
 
     <div id="emptyMsg" class="empty">아이템을 추가해보세요!</div>
 
-    <button class="clear-btn" onclick="clearChecked()">완료 항목 삭제</button>
+    <button class="clear-btn" id="clearBtn" onclick="clearChecked()">완료 항목 삭제</button>
   </div>
 
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <script>
-    let items = JSON.parse(localStorage.getItem('shoppingList') || '[]');
+    const SUPABASE_URL = 'https://abxteemzxniimfswqyvh.supabase.co';
+    const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFieHRlZW16eG5paW1mc3dxeXZoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODAyNDY3NDIsImV4cCI6MjA5NTgyMjc0Mn0.D3VhERjwWxlH2SLUEYEwb19jHJry4-547j5gQz07Nc0';
+
+    const { createClient } = supabase;
+    const db = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
     const input = document.getElementById('itemInput');
     const list = document.getElementById('list');
     const stats = document.getElementById('stats');
     const emptyMsg = document.getElementById('emptyMsg');
+    const addBtn = document.getElementById('addBtn');
+    const clearBtn = document.getElementById('clearBtn');
+    const errorMsg = document.getElementById('errorMsg');
+
+    let items = [];
+    let busy = false;
+
+    function setError(msg) {
+      errorMsg.textContent = msg;
+      errorMsg.style.display = msg ? 'block' : 'none';
+    }
+
+    function setBusy(val) {
+      busy = val;
+      addBtn.disabled = val;
+      clearBtn.disabled = val;
+    }
 
     input.addEventListener('keydown', e => { if (e.key === 'Enter') addItem(); });
-
-    function save() {
-      localStorage.setItem('shoppingList', JSON.stringify(items));
-    }
 
     function render() {
       list.innerHTML = '';
@@ -198,14 +227,14 @@
       emptyMsg.style.display = total === 0 ? 'block' : 'none';
       stats.textContent = total > 0 ? `총 ${total}개 · 완료 ${done}개` : '';
 
-      items.forEach((item, idx) => {
+      items.forEach(item => {
         const li = document.createElement('li');
         if (item.checked) li.classList.add('checked');
 
         const cb = document.createElement('input');
         cb.type = 'checkbox';
         cb.checked = item.checked;
-        cb.addEventListener('change', () => toggle(idx));
+        cb.addEventListener('change', () => toggle(item.id, !item.checked));
 
         const span = document.createElement('span');
         span.className = 'item-name';
@@ -215,42 +244,107 @@
         btn.className = 'delete-btn';
         btn.textContent = '✕';
         btn.title = '삭제';
-        btn.addEventListener('click', () => remove(idx));
+        btn.addEventListener('click', () => remove(item.id));
 
         li.append(cb, span, btn);
         list.appendChild(li);
       });
     }
 
-    function addItem() {
+    async function loadItems() {
+      setError('');
+      const { data, error } = await db
+        .from('shopping_items')
+        .select('*')
+        .order('created_at', { ascending: true });
+
+      if (error) { setError('데이터를 불러오지 못했습니다.'); return; }
+      items = data;
+      render();
+    }
+
+    async function addItem() {
       const name = input.value.trim();
-      if (!name) return;
-      items.push({ name, checked: false });
-      input.value = '';
-      save();
-      render();
-      input.focus();
+      if (!name || busy) return;
+      setBusy(true);
+      setError('');
+
+      const { data, error } = await db
+        .from('shopping_items')
+        .insert({ name, checked: false })
+        .select()
+        .single();
+
+      if (error) {
+        setError('추가에 실패했습니다.');
+      } else {
+        items.push(data);
+        input.value = '';
+        render();
+        input.focus();
+      }
+      setBusy(false);
     }
 
-    function toggle(idx) {
-      items[idx].checked = !items[idx].checked;
-      save();
-      render();
+    async function toggle(id, checked) {
+      if (busy) return;
+      setBusy(true);
+      setError('');
+
+      const { error } = await db
+        .from('shopping_items')
+        .update({ checked })
+        .eq('id', id);
+
+      if (error) {
+        setError('수정에 실패했습니다.');
+      } else {
+        const item = items.find(i => i.id === id);
+        if (item) item.checked = checked;
+        render();
+      }
+      setBusy(false);
     }
 
-    function remove(idx) {
-      items.splice(idx, 1);
-      save();
-      render();
+    async function remove(id) {
+      if (busy) return;
+      setBusy(true);
+      setError('');
+
+      const { error } = await db
+        .from('shopping_items')
+        .delete()
+        .eq('id', id);
+
+      if (error) {
+        setError('삭제에 실패했습니다.');
+      } else {
+        items = items.filter(i => i.id !== id);
+        render();
+      }
+      setBusy(false);
     }
 
-    function clearChecked() {
-      items = items.filter(i => !i.checked);
-      save();
-      render();
+    async function clearChecked() {
+      if (busy) return;
+      setBusy(true);
+      setError('');
+
+      const { error } = await db
+        .from('shopping_items')
+        .delete()
+        .eq('checked', true);
+
+      if (error) {
+        setError('삭제에 실패했습니다.');
+      } else {
+        items = items.filter(i => !i.checked);
+        render();
+      }
+      setBusy(false);
     }
 
-    render();
+    loadItems();
   </script>
 </body>
 </html>
